@@ -19,6 +19,11 @@
 //  08/27/2014 - J. Ritchie Carroll
 //       Generated original version of source code.
 //
+//  03/14/2024 - AJ Stadlin
+//       CustomProcessStartInfo and SafeDisposal added
+//
+//  11/17/2026 - AJ Stadlin
+//       SafeDisposal fix: Kill a still-running process before Close() (HasExited after Close() threw) [AI:CLAUDE]
 //******************************************************************************************************
 
 using System;
@@ -43,6 +48,7 @@ public static class Command
         private readonly StringBuilder m_standardOutput;
         private readonly StringBuilder m_standardError;
         private bool m_disposed;
+        private bool m_safeDisposal = false;
 
         #endregion
 
@@ -70,6 +76,21 @@ public static class Command
                     RedirectStandardError = true
                 } 
             };
+
+            // Use custom startup properties if defined
+            if (CustomProcessStartInfo != null)
+            {
+                if (CustomProcessStartInfo.FileName == string.Empty)
+                    CustomProcessStartInfo.FileName = fileName;
+
+                if (CustomProcessStartInfo.Arguments == string.Empty)
+                    CustomProcessStartInfo.Arguments = arguments;
+
+                m_process.StartInfo = CustomProcessStartInfo;
+            }
+
+            // When safe disposal is true, a still-running process is killed and then closed prior to process.Dispose()
+            m_safeDisposal = SafeDisposal;
 
             m_process.OutputDataReceived += m_process_OutputDataReceived;
             m_process.ErrorDataReceived += m_process_ErrorDataReceived;
@@ -143,6 +164,32 @@ public static class Command
 
                 m_process.OutputDataReceived -= m_process_OutputDataReceived;
                 m_process.ErrorDataReceived -= m_process_ErrorDataReceived;
+
+                if (m_safeDisposal)
+                {
+                    // Kill the process (and its child processes) if it is still running,
+                    // then Close() to release the process handle. HasExited must be checked
+                    // before Close(), since Close() disassociates the process from this object.
+                    try
+                    {
+                        if (!m_process.HasExited)
+                        {
+                            m_process.Kill(true);
+                            m_process.WaitForExit(5000);
+                        }
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Process was never started or has already been released
+                    }
+                    catch (System.ComponentModel.Win32Exception)
+                    {
+                        // Process could not be terminated (access denied or already terminating)
+                    }
+
+                    m_process.Close();
+                }
+
                 m_process.Dispose();
             }
             finally
@@ -191,6 +238,28 @@ public static class Command
 
         #endregion
     }
+
+    /// <summary>
+    /// When Command.SafeDisposal is true, a still-running process (and its child processes) is killed, then process.Close() is performed prior to process.Dispose()
+    /// Set SafeDisposal before Creating or Executing the CommandProcess
+    /// SafeDisposal Default is false for backward compatibility
+    /// </summary>
+    public static bool SafeDisposal { get; set; } = false;
+
+    /// <summary>
+    /// Customizable Command.ProcessStartInfo to set prior to Creating or Executing the CommandProcess.
+    /// The original Process.StartInfo defaults are used when Command.CustomProcessStartInfo is null.
+    /// Command.CustomProcessStartInfo is null to be consistent with earlier implementations.
+    /// Example to create a Command.CustomProcessStartInfo with Gemstone default StartInfo but without creating a Window:
+    /// Gemstone.Console.Command.CustomProcessStartInfo = new()
+    /// {
+    ///     UseShellExecute = false,
+    ///     RedirectStandardError = true,
+    ///     RedirectStandardOutput = true,
+    ///     CreateNoWindow = true
+    /// };
+    /// </summary>
+    public static ProcessStartInfo? CustomProcessStartInfo { get; set; } = null;
 
     /// <summary>
     /// Executes a command line operation and returns its standard output and exit code or throws an exception with the standard error.
